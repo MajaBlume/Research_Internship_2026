@@ -134,7 +134,7 @@ class OdeProblem(eqx.Module):
 
         solution = diffrax.diffeqsolve(
             diffrax.ODETerm(self.rhs),
-            diffrax.Tsit5(),
+            diffrax.Kvaerno5(),
             t0=ts[0],
             t1=ts[-1],
             dt0=1.0,
@@ -145,7 +145,8 @@ class OdeProblem(eqx.Module):
             ),
             saveat=diffrax.SaveAt(ts=ts),
             max_steps=300_000,
+            throw=False
         )
-        ys = solution.ys  # shape: (T, n_states)
-        return ys                   # (T, n_states)
-
+        ok = solution.result == diffrax.RESULTS.successful
+        ys = jnp.where(ok,solution.ys, 0.0)  # shape: (T, n_states)
+        return ys, ok                  # (T, n_states)

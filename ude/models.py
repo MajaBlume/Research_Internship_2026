@@ -1,30 +1,3 @@
-"""
-ude.models
-==========
-
-Model classes for the Universal Differential Equation framework.
-
-Four model types are provided, all compatible with diffrax as ODE right-hand
-sides and with equinox's pytree/JIT machinery:
-
-    NDE     — Neural Differential Equation (fully data-driven)
-    ODE     — Full Ruoff glycolysis model with trainable k5
-    ODEcore — Mechanistic skeleton with the k5-term intentionally removed
-    UDE     — Hybrid = ODEcore  +  λ · constraint(ODEcore)  ·  NDE
-
-All classes inherit from ``eqx.Module``, making them immutable JAX pytrees
-that support ``jax.jit``, ``jax.grad``, and ``jax.vmap`` transparently.
-
-References
-----------
-Ruoff, P. et al. (2003). The Goodwin model: simulating the effect of
-    cycloheximide and heat shock on the circadian clock of Neurospora crassa.
-    J. Theor. Biol., 209(1), 29–42.
-
-Philipps, M. et al. (2025). Universal differential equations in systems
-    biology. (preprint)
-"""
-
 from __future__ import annotations
 
 from typing import Literal
@@ -104,261 +77,10 @@ class NDE(eqx.Module):
 
 # ===========================================================================
 # ODEs The Construction of a community model of S. elongatus, 
-#   U. maydis and S. cerevisiae
+#   U. maydis and  (S. cerevisiae)
 # ===========================================================================
 
-class Co_Culture (eqx.Module):
-    """
-    This is the basic model of sucrose cross feeding which only takes into 
-    account growth of S. elongatus following monod kinetic dependent on 
-    photon availability, a growth coupled export of Sucrose by S. elongatus 
-    and the growth of U. maydis following monod kinetic dependent on sucrose
-    availability as well as the growth coupled import of sucrose by U. maydis.
-    Photon availability is derived by Lambert Beer and absobance coefficients 
-    of S. elongatus and U. maydis
-    
-    State Vector (3 Components)
-        --------------------------------
-        Se    — S. elongatus
-        Suc   — Sucrose
-        Um    - U. maydis
-    
-    Parameter vector (9 components)
-        ---------------------------------
-        u_max_Se, k_L_Se, L_0, e_Se, k_death_Se, alpha_Suc_Se, u_max_Um, 
-        k_Suc_Um, Y_Um_Suc, k_death_Um, e_Um
-    
-    weights: Array
-    u_max_Se: float
-    
-    """
-
-    def __call__(self, t: float, variables: Array, args) -> Array:
-        Se,Suc, Um= variables
-        u_max_Se, k_L_Se, L_0, e_Se, k_death_Se, beta_Suc_Se, u_max_Um, k_Suc_Um, Y_Um_Suc, k_death_Um, e_Um = self.weights
-        
-        # derived photon availability
-        L       = L_0*jnp.exp(-Se*e_Se - Um*e_Um)
-        
-        # specific growth of Se
-        u_Se    = u_max_Se * (L /(k_L_Se + L))
-        
-        # specific growth of Um
-        u_Um    = u_max_Um * (Suc /(k_Suc_Um + Suc))
-        Suc_imp_Um = u_Um * Um * 1/Y_Um_Suc
-        
-        # Sucrose export by Se
-        Suc_exp_Se  = Se * L * beta_Suc_Se
-       
-        # change of variables
-        dSedt   = Se * (u_Se - k_death_Se)
-        dUmdt   = Um * (u_Um - k_death_Um)
-        dSucdt  = Suc_exp_Se - Suc_imp_Um
-    
-        return jnp.array([dSedt, dSucdt, dUmdt])
-
-
-class Co_Culture_Nitrogen (eqx.Module):
-    """
-    Added Nitrogen to Co_culture: 
-    - both microbes are following monod kinetics if limited by Nitrogen
-    - Nitrogen is only imported by microbes and has to be in the medium to enable growth
-    
-    State Vector (3 Components)
-            --------------------------------
-            Se    — S. elongatus
-            Suc   — Sucrose
-            Um    - U. maydis
-            N     - Nitrogen
-        
-        Parameter vector (9 components)
-            ---------------------------------
-            u_max_Se, k_L_Se, L_0, e_Se, k_death_Se, alpha_Suc_Se, k_b, u_max_Um, k_Suc_Um,
-            Y_Um_Suc, k_death_Um, e_Um, k_N_Se, k_N_Um, Y_Se_N, Y_Um_N
-        
-        weights: Array
-    """
-
-    weights: Array
-
-    def __call__(self, t: float, variables: Array, args) -> Array:
-        Se,Suc, Um, N, = variables
-        u_max_Se, k_L_Se, L_0, e_Se, k_death_Se, beta_Suc_Se, k_b, u_max_Um, k_Suc_Um, Y_Um_Suc, k_death_Um, e_Um, k_N_Se, k_N_Um, Y_Se_N, Y_Um_N = self.weights
-        
-        # derived
-        L       = L_0*jnp.exp(-Se*e_Se - Um*e_Um)
-        
-        # growth of Se
-        u_Se    = u_max_Se * (L /(k_L_Se + L)) * (N/(k_N_Se+N))
-        
-        # growth of Um
-        u_Um    = u_max_Um * (Suc /(k_Suc_Um + Suc)) * (N/(k_N_Um+N))
-        Suc_imp_Um = u_Um * Um * 1/Y_Um_Suc
-        
-        # Sucrose export by Se
-        Suc_exp_Se  = Se * u_Se * alpha_Suc_Se
-        metabolic_burdon_sucrose =k_b * L * beta_Suc_Se
-       
-        # change of variables
-        dSedt   = Se * (u_Se - k_death_Se) - metabolic_burdon_sucrose
-        dUmdt   = Um * (u_Um - k_death_Um)
-        dSucdt  = Suc_exp_Se - Suc_imp_Um
-        dNdt    = -dSedt * 1/Y_Se_N - dUmdt * 1/Y_Um_N
-    
-
-        return jnp.array([dSedt, dSucdt, dUmdt, dNdt])
-    
-    
-class Community_Nitrogen_Met1_Suc_Feed (eqx.Module):
-    
-    """
-        Added to Co_culture_Nitrogen:
-        - S. cerevisiae
-        - Met 1
-        
-        State Vector ( Components)
-                --------------------------------
-                Se    — S. elongatus
-                Suc   — Sucrose
-                Um    - U. maydis
-                N     - Nitrogen
-                Met1  - Metabolite 1
-                Sc    - S. cerevisiea
-            
-            Parameter vector ( components)
-                ---------------------------------
-               
-            
-            weights: Array
-    """
-    
-    # constant feed
-    weights: Array
-    u_max_Se: float
-
-    def __call__(self, t: float, variables: Array, args) -> Array:
-        Se,Suc, Um, N, Met1, Sc, = variables
-        Suc = jnp.maximum(0,Suc)
-        N = jnp.maximum(0,N)
-        Met1 =jnp.maximum(0, Met1)
-        Sc = jnp.maximum(0,Sc)
-        Um =jnp.maximum(0,Um)
-        Se =jnp.maximum(0,Se)
-        
-        
-        k_L_Se, L_0, e_Se, k_death_Se, alpha_Suc_Se, k_b,u_max_Um,k_Suc_Um, Y_Um_Suc, k_death_Um, e_Um,k_N_Se, k_N_Um, Y_Se_N,Y_Um_N, k_imp_Met1_Se, k_Met1_Se, beta_Met1_Um, u_max_Sc, k_Suc_Sc, Y_Sc_Suc, k_N_Sc, Y_N_Sc, k_death_Sc, e_Sc, Suc_feed   = self.weights
-        # derived
-        L       = L_0*jnp.exp(-Se*e_Se - Um*e_Um - Sc*e_Sc)
-        
-        # growth of Se
-        u_Se    = self.u_max_Se * (L /(k_L_Se + L)) * (N/(k_N_Se+N)) 
-        Met1_imp_Se = Se*k_imp_Met1_Se*(Met1/(k_Met1_Se+Met1))
-        u_Se    = u_Se*(1+(Met1/(k_Met1_Se+Met1)))
-        
-        #Saccharomyces Cerevisiae
-        u_Sc    = u_max_Sc * (Suc /(k_Suc_Sc + Suc)) * (N/(k_N_Sc+N))
-        Suc_imp_Sc = u_Sc * Sc * 1/Y_Sc_Suc
-        
-        # growth of Um
-        u_Um    = u_max_Um * (Suc /(k_Suc_Um + Suc)) * (N/(k_N_Um+N))
-        Suc_imp_Um = u_Um * Um * 1/Y_Um_Suc
-        Met1_exp_Um= Um * u_Um * beta_Met1_Um
-        
-        # Sucrose export by Se
-        Suc_exp_Se  = Se * L * alpha_Suc_Se
-       
-        # change of variables
-        dSedt       = Se * (u_Se - k_death_Se)
-        dUmdt       = Um * (u_Um - k_death_Um)
-        dSucdt      = Suc_exp_Se - Suc_imp_Um - Suc_imp_Sc + Suc_feed
-        dNdt        = -u_Se*Se * 1/Y_Se_N - u_Um*Um * 1/Y_Um_N - u_Sc*Sc * 1/Y_N_Sc 
-        dMet1dt     = Met1_exp_Um - Met1_imp_Se
-        dScdt       = Sc * (u_Sc - k_death_Sc)
-
-        return jnp.array([dSedt, dSucdt, dUmdt, dNdt, dMet1dt, dScdt])
-
-
-
-class Axenic_Se(eqx.Module):
-
-
-    weights: Array
-
-    def __call__(self, t: float, variables: Array, args) -> Array:
-        Se= variables
-        u_max_Se, k_L_Se, L_0, e_Se, k_death_Se = self.weights
-        
-        # derived
-        L           = L_0*jnp.exp(-Se*e_Se)
-        
-        # gowth of Se
-        u_Se        = u_max_Se * (L /(k_L_Se + L))
-        dSedt   = Se * (u_Se -k_death_Se)
-
-        return jnp.array([dSedt])
-    
-    
-class Simulation_Data_minimal_Suc_feed(eqx.Module):
-    """
-    The complete Ruoff (2003) glycolysis model with **trainable** k5.
-
-    State vector (7 components)
-    ---------------------------
-    Se    — autotroph
-    Um    — heterotroph
-    Suc   — Sucrose
-    
-    Parameter vector (13 components)
-    ---------------------------------
-    u_max_Se, u_max_Um, k_L_se, k_Suc_se, 
-
-    ``k5`` controls the ATP-degradation rate  (-k5 · A3 in dA3/dt).
-    It is kept as a free/learnable parameter here to allow the ODE to
-    compensate for the missing term.  In ``ODEcore`` this term is removed
-    entirely, with a neural network learning it instead.
-
-    Parameters
-    ----------
-    weights : jax.Array, shape (13,)
-        All 13 model parameters, including k5.
-
-    Examples
-    --------
-    >>> ode = ODE(weights=RUOFF_PARAMS)
-    >>> ode(t=0.0, y=Y0_RUOFF, args=None)   # returns shape (7,)
-    """
-
-    weights: Array
-
-    def __call__(self, t: float, variables: Array, args) -> Array:
-        Se, Um, Suc = variables
-        u_max_Se, u_max_Um, k_L_Se, k_Suc_Se, k_Suc_Um, y_Um_Suc, L_0, e_Se, e_UM, k_death_Se, k_death_Um, Suc_feed = self.weights
-        
-        # derived
-        L           = L_0*jnp.exp(-Se*e_Se - Um*e_UM)
-        
-        # gowth of Se
-        u_Se        = u_max_Se * (L /(k_L_Se + L))
-          
-        # growth of Um
-        u_Um        = u_max_Um * (Suc /(k_Suc_Um + Suc))
-        
-        # Sucrose export by Se
-        Suc_exp_Se  = Se * u_Se * k_Suc_Se
-    
-        # Sucrose import by Um
-        Suc_imp_Um  =Um * u_Um/y_Um_Suc
-        
-        # change of variables
-        dSedt   = Se * (u_Se -k_death_Se)
-        dUmdt   = Um * (u_Um -k_death_Um)
-        dSucdt  = Suc_exp_Se - Suc_imp_Um + Suc_feed
-        
-
-        return jnp.array([dSedt, dUmdt, dSucdt])
-
-
-class Community_Final_Model (eqx.Module):
+class Coculture_Final_Model (eqx.Module):
     
     """
         State Vector ( Components)
@@ -393,56 +115,121 @@ class Community_Final_Model (eqx.Module):
     """
     parameters_Se: Array
     parameters_Um: Array
-    parameters_Sc: Array
     parameters_abiotic: Array
 
     def __call__(self, t: float, variables: Array, args) -> Array:
         
         # parameters and variables:
         # ----------------------------------------------------
-        Se,Um,Sc,Suc,N,P1,Met1,Met2,pH,B = variables
-        u_max_Se, k_L_Se, e_Se,  k_N_Se, Y_Se_N, k_death_Se, alpha_Suc_Se, k_Met1_Se, Y_Se_Met1, beta_Met2_Se, k_P1_Met2_Se, K_I_pH_Suc_exp = self.parameters_Se
+        Se,Um,Suc,N,P1,Met1,Met2, = variables
+        u_max_Se, k_L_Se, e_Se,  k_N_Se, Y_Se_N, k_death_Se, alpha_Suc_Se, k_Met1_Se, Y_Se_Met1, beta_Met2_Se = self.parameters_Se
         u_max_Um,k_Suc_Um, Y_Um_Suc, k_N_Um,Y_Um_N, k_death_Um, e_Um, beta_Met1_Um, K_I_Met1_Um, K_I_Met2_Um = self.parameters_Um
-        u_max_Sc, k_Suc_Sc, Y_Sc_Suc, k_N_Sc, Y_N_Sc, k_death_Sc, e_Sc, alpha_H_Sc = self.parameters_Sc
-        L_0, e_medium, K_B,= self.parameters_abiotic
+        L_0, e_medium, = self.parameters_abiotic
     
         # derived
-        L = L_0 * jnp.exp(-Se*e_Se - Um*e_Um - Sc*e_Sc - e_medium)
+        L = L_0 * jnp.exp(-Se*e_Se - Um*e_Um - e_medium)
         
         # growth of Se
-        u_Se    = u_max_Se * (L /(k_L_Se + L)) * (N/(k_N_Se+N)) * (1+(Met1/(k_Met1_Se+Met1)))
-        Met1_imp_Se = Se * u_Se * (Met1/(k_Met1_Se+Met1))/Y_Se_Met1
-        Met2_exp_Se = Se * beta_Met2_Se * P1
-        Suc_exp_Se  = Se * alpha_Suc_Se * L * ((K_I_pH_Suc_exp / K_I_pH_Suc_exp) + pH)
-    
-        #Saccharomyces Cerevisiae
-        u_Sc           = u_max_Sc * (Suc /(k_Suc_Sc + Suc)) * (N/(k_N_Sc+N))
-        Suc_imp_Sc     = u_Sc * Sc * 1/Y_Sc_Suc
-        exp_pH_Sc       = Sc * u_Sc * alpha_H_Sc
+        u_Se    = u_max_Se * (L / (k_L_Se + L)) * (N / (k_N_Se + N)) * (1 + (Met1 / (k_Met1_Se + Met1)))
+        Met1_imp_Se = Se * u_Se * (Met1 / (k_Met1_Se + Met1)) / Y_Se_Met1
+        Suc_exp_Se  = Se * alpha_Suc_Se * L
         
         # growth of Um
-        u_Um    = u_max_Um * (Suc /(k_Suc_Um + Suc)) * (N/(k_N_Um+N)) * (K_I_Met2_Um/(K_I_Met2_Um + Met2))
+        u_Um    = u_max_Um * (Suc / (k_Suc_Um + Suc)) * (N / (k_N_Um + N)) * (K_I_Met2_Um / (K_I_Met2_Um + Met2))
         Suc_imp_Um = u_Um * Um * 1/Y_Um_Suc
-        Met1_exp_Um = Um * u_Um * beta_Met1_Um * (K_I_Met1_Um/(Met1+K_I_Met1_Um))
+        Met1_exp_Um = Um * u_Um * beta_Met1_Um * (K_I_Met1_Um / (Met1 + K_I_Met1_Um))
         
         # change of variables
         #---------------------------------------------------------
         # microbes
         dSedt       = Se * (u_Se - k_death_Se)
         dUmdt       = Um * (u_Um - k_death_Um)
-        dScdt       = Sc * (u_Sc - k_death_Sc)
+
         
         # paramters, metabolites, etc. (ressources)
-        dSucdt      = Suc_exp_Se -Suc_imp_Um
-        dNdt        = -u_Se*Se * 1/Y_Se_N - u_Um*Um * 1/Y_Um_N
+        dSucdt      = Suc_exp_Se - Suc_imp_Um
+        dNdt        = - u_Se * Se * 1/Y_Se_N - u_Um * Um * 1/Y_Um_N
         dP1dt       = 0.0
         dMet1dt     = Met1_exp_Um - Met1_imp_Se
-        dMet2dt     = Met2_exp_Se
-        dBdt        = - exp_pH_Sc*((B+K_B)/K_B)
-        dpHdt       = exp_pH_Sc*(K_B/(K_B+B))
-        
+        dMet2dt     = 0.0
 
-        return jnp.array([dSedt,dUmdt,dScdt,dSucdt,dNdt,dP1dt,dMet1dt,dMet2dt,dpHdt,dBdt])
+        return jnp.array([dSedt,dUmdt,dSucdt,dNdt,dP1dt,dMet1dt,dMet2dt])
+    
+    
+class Coculture_no_Met1 (eqx.Module):
+    
+    """
+        State Vector ( Components)
+                --------------------------------
+                Se: S. elongatus
+                Um: U. maydis
+                Suc: Sucrose
+                N: Nitrogen
+                P1: Parameter1
+                Met1: Metabolite1
+                Met2: Metabolite2
+            
+            Parameter vectors
+                ---------------------------------
+                    
+                    parameters_Se: Array
+                    -----------------------------
+                    u_max_Se, k_L_Se, e_Se,  k_N_Se, Y_Se_N, k_death_Se,
+                    beta_Suc_Se, k_Met1_Se, beta_Met2_Se, k_P1_Met2_Se, K_I_pH_Suc_exp
+                     
+                    parameters_Um: Array
+                    -----------------------------
+                    u_max_Um, k_Suc_Um, Y_Um_Suc, k_N_Um,Y_Um_N, k_death_Um,
+                    e_Um, beta_Met1_Um, K_I_Met1_Um, K_I_Met2_Um, k_Met2_Um
+                    
+                    parameters_abiotic: Array
+                    -----------------------------
+                    L_0, Suc_Feed
+                
+            
+            weights: Array
+    """
+    parameters_Se: Array
+    parameters_Um: Array
+    parameters_abiotic: Array
+
+    def __call__(self, t: float, variables: Array, args) -> Array:
+        
+        # parameters and variables:
+        # ----------------------------------------------------
+        Se,Um,Suc,N,P1,Met1,Met2, = variables
+        u_max_Se, k_L_Se, e_Se,  k_N_Se, Y_Se_N, k_death_Se, alpha_Suc_Se, k_Met1_Se, Y_Se_Met1, beta_Met2_Se = self.parameters_Se
+        u_max_Um,k_Suc_Um, Y_Um_Suc, k_N_Um,Y_Um_N, k_death_Um, e_Um, beta_Met1_Um, K_I_Met1_Um, K_I_Met2_Um = self.parameters_Um
+        L_0, e_medium, = self.parameters_abiotic
+    
+        # derived
+        L = L_0 * jnp.exp(-Se*e_Se - Um*e_Um - e_medium)
+        
+        # growth of Se
+        u_Se    = u_max_Se * (L / (k_L_Se + L)) * (N / (k_N_Se + N)) # * (1 + (Met1 / (k_Met1_Se + Met1)))
+        #Met1_imp_Se = Se * u_Se * (Met1 / (k_Met1_Se + Met1)) / Y_Se_Met1
+        Suc_exp_Se  = Se * alpha_Suc_Se * L
+        
+        # growth of Um
+        u_Um    = u_max_Um * (Suc / (k_Suc_Um + Suc)) * (N / (k_N_Um + N)) * (K_I_Met2_Um / (K_I_Met2_Um + Met2))
+        Suc_imp_Um = u_Um * Um * 1/Y_Um_Suc
+        #Met1_exp_Um = Um * u_Um * beta_Met1_Um * (K_I_Met1_Um / (Met1 + K_I_Met1_Um))
+        
+        # change of variables
+        #---------------------------------------------------------
+        # microbes
+        dSedt       = Se * (u_Se - k_death_Se)
+        dUmdt       = Um * (u_Um - k_death_Um)
+
+        
+        # paramters, metabolites, etc. (ressources)
+        dSucdt      = Suc_exp_Se - Suc_imp_Um
+        dNdt        = - u_Se * Se * 1/Y_Se_N - u_Um * Um * 1/Y_Um_N
+        dP1dt       = 0.0
+        dMet1dt     = 0.0 # Met1_exp_Um - Met1_imp_Se
+        dMet2dt     = 0.0
+
+        return jnp.array([dSedt,dUmdt,dSucdt,dNdt,dP1dt,dMet1dt,dMet2dt])
 
 
 # ===========================================================================
@@ -470,9 +257,7 @@ class ODE_LV_core(eqx.Module):
 # UDE: Universal Differential Equation (hybrid)
 # ===========================================================================
 
-
-
-class UDE_Community(eqx.Module):
+class UDE_Coculture(eqx.Module):
     """
     In general we compute our UDE as follows UDE = ODE + constraint(NDE)
     However for the first two nodes or the species we comppute: ODE + s(t) * constraint(NDE)
@@ -505,14 +290,66 @@ class UDE_Community(eqx.Module):
         ode_out = self.ode(t, y, args)
         nde_out = self.nde(t, y, args)
         
-        scaling = jnp.ones_like(y)
-        scaling = scaling.at[0:3].set(y[0:3])
-        return ode_out + self.lambda_ * scaling * nde_out
+        species_scale = jnp.ones_like(y)
+        species_scale = species_scale.at[0:2].set(y[0:2])
+        return ode_out + self.lambda_ * species_scale * nde_out
     
+class NSM(eqx.Module):
     
+    """
+    Reconstruction of an easy form of NSM
+    
+    """
+    nde: eqx.Module
+    parameters: Array
+
+    def __init__(
+        self,
+        nde: eqx.Module,
+        parameters: Array,  
+    ) -> None:
+        
+        self.nde = nde
+        self.parameters = parameters
+
+    # ------------------------------------------------------------------
+    # Forward pass
+    # ------------------------------------------------------------------
+
+    def __call__(self, t: float, y: Array, args) -> Array:
+        """Evaluate the UDE vector field at time ``t`` and state ``y``."""
+        
+        (P_S1_M1, P_S2_M1, C_S1_M1, C_S2_M1, b_M1, 
+        P_S1_M2, P_S2_M2, C_S1_M2,C_S2_M2, b_M2,
+        P_S1_M3, P_S2_M3, C_S1_M3, C_S2_M3, b_M3, 
+        P_S1_M4, P_S2_M4, C_S1_M4, C_S2_M4, b_M4) = self.parameters
+        
+        def soft10(x: float) -> float:
+            """Calcultates the softplus function with base 10."""
+            return jnp.log10(1 + jnp.exp(x))
+        
+        nde_out = self.nde(t, y, args)
+        S1 = y[0]
+        S2 = y[1]
+        M1 = y[2]
+        M2 = y[3]
+        P1 = y[4]
+        M3 = y[5]
+        M4 = y[6]
+        
+        dS1dt = S1 * nde_out[0]
+        dS2dt = S2 * nde_out[1]
+        dM1dt = jax.nn.softplus(nde_out[2]) * (S1 * soft10(P_S1_M1) + S2 * soft10(P_S2_M1) - M1 * (S1 * soft10(C_S1_M1) + S2 * soft10(C_S2_M1) + soft10(b_M1)))
+        dM2dt = jax.nn.softplus(nde_out[3]) * (S1 * soft10(P_S1_M2) + S2 * soft10(P_S2_M2) - M2 * (S1 * soft10(C_S1_M2) + S2 * soft10(C_S2_M2) + soft10(b_M2)))
+        dP1dt = 0.0
+        dM3dt = jax.nn.softplus(nde_out[5]) * (S1 * soft10(P_S1_M3) + S2 * soft10(P_S2_M3) - M3 * (S1 * soft10(C_S1_M3) + S2 * soft10(C_S2_M3) + soft10(b_M3)))
+        dM4dt = jax.nn.softplus(nde_out[6]) * (S1 * soft10(P_S1_M4) + S2 * soft10(P_S2_M4) - M4 * (S1 * soft10(C_S1_M4) + S2 * soft10(C_S2_M4) + soft10(b_M4)))
+
+        return jnp.array([dS1dt,dS2dt,dM1dt,dM2dt,dP1dt,dM3dt,dM4dt])   
     
     
 class UDE(eqx.Module):
+    
     """
     Universal Differential Equation: mechanistic ODE + neural network.
 
